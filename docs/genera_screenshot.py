@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Genera le immagini del README (docs/img/*.png) usando l'app vera sul video di prova.
-Linux:  xvfb-run -s "-screen 0 1120x780x24" python docs/genera_screenshot.py
+Linux:  xvfb-run -s "-screen 0 1120x800x24" python docs/genera_screenshot.py
 Serve ImageMagick (comando `import`) per catturare la finestra.
 """
 import json
@@ -70,13 +70,13 @@ def main():
     P.elabora = lambda **kw: elabora_orig(url=f"http://127.0.0.1:{porta}", **kw)
 
     app = P.App()
-    app.root.geometry("1120x780+0+0")
+    app.root.geometry("1120x800+0+0")
     scatti = {}
 
     def foto(nome):
         app.root.update()
         out = os.path.join(img_dir, nome)
-        subprocess.run(["import", "-window", "root", "-crop", "1120x780+0+0", "+repage", out], check=True)
+        subprocess.run(["import", "-window", "root", "-crop", "1120x800+0+0", "+repage", out], check=True)
         print("  screenshot:", out, flush=True)
 
     def passo():
@@ -84,7 +84,7 @@ def main():
         if "inizio" not in scatti:
             scatti["inizio"] = 1
             app.carica_video(video)
-            app.root.after(1500, lambda: (foto("finestra.png"), app.avvia()))
+            app.root.after(1500, app.avvia)
         elif fase == "lettura" and app.trovati >= 4 and "lettura" not in scatti:
             scatti["lettura"] = 1
             foto("lettura.png")
@@ -117,8 +117,9 @@ def main():
     titolo = np.full((60, 1292, 3), 255, np.uint8)
     for x, t in ((230, "PRIMA (francese)"), (880, "DOPO (italiano)")):
         cv2.putText(titolo, t, (x, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (60, 30, 30), 2, cv2.LINE_AA)
-    cv2.imwrite(os.path.join(img_dir, "prima_dopo.png"), np.vstack([titolo] + righe[:-1]))
-    print("  immagine:", os.path.join(img_dir, "prima_dopo.png"))
+    cv2.imwrite(os.path.join(img_dir, "prima_dopo.jpg"), np.vstack([titolo] + righe[:-1]),
+                [cv2.IMWRITE_JPEG_QUALITY, 85])
+    print("  immagine:", os.path.join(img_dir, "prima_dopo.jpg"))
 
 
 if __name__ == "__main__":

@@ -1090,14 +1090,15 @@ def cancella_originale(frame, box, modo):
         giallo = cv2.inRange(hsv, (15, 80, 150), (40, 255, 255))
         maschera = cv2.dilate(cv2.bitwise_or(chiaro, giallo), np.ones((3, 3), np.uint8), iterations=3)
         frame[y1:y2, x1:x2] = cv2.inpaint(roi, maschera, 5, cv2.INPAINT_TELEA)
-    elif modo == "sfoca":
-        # sfocatura forte ma veloce: rimpicciolisci, sfoca, ingrandisci
+    else:
+        # sfocatura forte ma veloce (rimpicciolisci, sfoca, ingrandisci): le lettere
+        # originali spariscono del tutto invece di restare visibili in trasparenza
         rh, rw = roi.shape[:2]
         mini = cv2.resize(roi, (max(1, rw // 8), max(1, rh // 8)), interpolation=cv2.INTER_AREA)
         mini = cv2.GaussianBlur(mini, (0, 0), 3)
-        frame[y1:y2, x1:x2] = cv2.resize(mini, (rw, rh), interpolation=cv2.INTER_LINEAR)
-    else:  # "box": fascia scura quasi opaca
-        frame[y1:y2, x1:x2] = (roi * 0.12).astype(np.uint8)
+        sfocato = cv2.resize(mini, (rw, rh), interpolation=cv2.INTER_LINEAR)
+        # "box": fascia scura semitrasparente (si intravede la scena, non il vecchio testo)
+        frame[y1:y2, x1:x2] = sfocato if modo == "sfoca" else (sfocato * 0.25).astype(np.uint8)
 
 
 def incolla(frame, rgba, x, y):
@@ -1388,8 +1389,8 @@ class App:
         self.imp = carica_impostazioni()
         self.root = tk.Tk()
         self.root.title("Traduttore Sottotitoli")
-        self.root.geometry("1120x780")
-        self.root.minsize(1020, 720)
+        self.root.geometry("1120x800")
+        self.root.minsize(1020, 740)
         self.root.configure(bg=self.C["sfondo"])
         fam = tkfont.nametofont("TkDefaultFont").actual("family")
         self.font = lambda dim, grassetto=False: (fam, dim, "bold" if grassetto else "normal")
@@ -1413,13 +1414,13 @@ class App:
         st.theme_use("clam")
         st.configure(".", background=C["card"], foreground=C["testo"], font=self.font(12))
         st.configure("TCombobox", fieldbackground="#f9fafb", background="#f9fafb", bordercolor=C["bordo"],
-                     arrowcolor=C["tenue"], padding=5)
+                     arrowcolor=C["tenue"], padding=4)
         st.map("TCombobox", fieldbackground=[("readonly", "#f9fafb")], bordercolor=[("focus", C["accento"])])
         st.configure("TCheckbutton", background=C["card"], font=self.font(12))
         st.map("TCheckbutton", background=[("active", C["card"])],
                indicatorcolor=[("selected", C["accento"]), ("!selected", "#ffffff")])
         st.configure("Primario.TButton", background=C["accento"], foreground="#ffffff", borderwidth=0,
-                     focusthickness=0, font=self.font(15, True), padding=(18, 13))
+                     focusthickness=0, font=self.font(15, True), padding=(18, 11))
         st.map("Primario.TButton", background=[("disabled", "#c7c9d9"), ("active", C["accento_scuro"])],
                foreground=[("disabled", "#f3f4f6")])
         st.configure("Secondario.TButton", background=C["accento_chiaro"], foreground=C["accento_scuro"],
@@ -1435,13 +1436,13 @@ class App:
         tk, C = self.tk, self.C
         esterno = tk.Frame(genitore, bg=C["card"], highlightbackground=C["bordo"], highlightthickness=1)
         testa = tk.Frame(esterno, bg=C["card"])
-        testa.pack(fill="x", padx=18, pady=(14, 6))
+        testa.pack(fill="x", padx=18, pady=(12, 4))
         if numero:
             tk.Label(testa, text=str(numero), bg=C["accento"], fg="#ffffff", font=self.font(11, True),
                      width=2).pack(side="left", padx=(0, 10))
         tk.Label(testa, text=titolo, bg=C["card"], fg=C["testo"], font=self.font(14, True)).pack(side="left")
         dentro = tk.Frame(esterno, bg=C["card"])
-        dentro.pack(fill="both", expand=True, padx=18, pady=(4, 16))
+        dentro.pack(fill="both", expand=True, padx=18, pady=(2, 14))
         return esterno, dentro
 
     def _costruisci(self):
@@ -1450,14 +1451,14 @@ class App:
         testata = tk.Frame(self.root, bg=C["testata"])
         testata.pack(fill="x")
         tk.Label(testata, text="🎬  Traduttore Sottotitoli", bg=C["testata"], fg="#ffffff",
-                 font=self.font(20, True)).pack(side="left", padx=(22, 12), pady=(16, 16))
+                 font=self.font(19, True)).pack(side="left", padx=(22, 12), pady=(12, 12))
         tk.Label(testata, text="sottotitoli impressi nel video  →  italiano  ·  AI sul tuo computer",
-                 bg=C["testata"], fg=C["testata2"], font=self.font(12)).pack(side="left", pady=(22, 16))
+                 bg=C["testata"], fg=C["testata2"], font=self.font(12)).pack(side="left", pady=(17, 12))
         tk.Label(testata, text=f"v{VERSIONE}", bg=C["testata"], fg=C["testata2"],
                  font=self.font(11)).pack(side="right", padx=22)
 
         corpo = tk.Frame(self.root, bg=C["sfondo"])
-        corpo.pack(fill="both", expand=True, padx=18, pady=16)
+        corpo.pack(fill="both", expand=True, padx=18, pady=(14, 8))
         corpo.columnconfigure(0, minsize=400)
         corpo.columnconfigure(1, weight=1)
         corpo.rowconfigure(0, weight=1)
@@ -1472,14 +1473,14 @@ class App:
         ttk.Button(d1, text="Scegli video…", style="Secondario.TButton", command=self.scegli).pack(anchor="w")
         self.l_nome = tk.Label(d1, text="Nessun video scelto", bg=C["card"], fg=C["testo"],
                                font=self.font(12, True), anchor="w", justify="left", wraplength=360)
-        self.l_nome.pack(fill="x", pady=(10, 0))
+        self.l_nome.pack(fill="x", pady=(8, 0))
         self.l_info = tk.Label(d1, text="mp4, mkv, mov, avi…", bg=C["card"], fg=C["tenue"],
                                font=self.font(11), anchor="w")
         self.l_info.pack(fill="x")
 
         # 2 - impostazioni
         c2, d2 = self._card(sx, 2, "Impostazioni")
-        c2.pack(fill="x", pady=14)
+        c2.pack(fill="x", pady=12)
         imp = self.imp
         inv = {v: k for k, v in self.etichette.items()}
         self.v_lingua = tk.StringVar(value=inv.get(imp.get("lingua", "fr"), "Francese (fr)"))
@@ -1501,13 +1502,12 @@ class App:
         ]
         for r, (testo, w) in enumerate(righe):
             tk.Label(d2, text=testo, bg=C["card"], fg=C["tenue"], font=self.font(12)).grid(
-                row=r, column=0, sticky="w", pady=4, padx=(0, 12))
-            w.grid(row=r, column=1, sticky="ew", pady=4)
+                row=r, column=0, sticky="w", pady=3, padx=(0, 12))
+            w.grid(row=r, column=1, sticky="ew", pady=3)
         d2.columnconfigure(1, weight=1)
-        tk.Label(d2, text="auto = controlla sopra e sotto, anche se cambia da scena a scena.\n"
-                          "Mac/PC con 8 GB di RAM: scegli il modello qwen2.5:3b.",
+        tk.Label(d2, text="auto = sopra e sotto, anche se cambia scena  ·  8 GB di RAM → qwen2.5:3b",
                  bg=C["card"], fg=C["tenue"], font=self.font(10), justify="left").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 8))
+            row=4, column=0, columnspan=2, sticky="w", pady=(2, 6))
         ttk.Checkbutton(d2, text="Prova sui primi 2 minuti", variable=self.v_prova).grid(
             row=5, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(d2, text="Solo file .srt (non rifare il video)", variable=self.v_srt).grid(
@@ -1519,7 +1519,7 @@ class App:
         self.b_avvia = ttk.Button(d3, text="▶   Traduci in italiano", style="Primario.TButton", command=self.avvia)
         self.b_avvia.pack(fill="x")
         riga = tk.Frame(d3, bg=C["card"])
-        riga.pack(fill="x", pady=(10, 0))
+        riga.pack(fill="x", pady=(8, 0))
         self.b_ferma = ttk.Button(riga, text="■  Interrompi", style="Secondario.TButton",
                                   command=self.ferma, state="disabled")
         self.b_ferma.pack(side="left", expand=True, fill="x", padx=(0, 5))
@@ -1536,7 +1536,7 @@ class App:
         self._schermo_vuoto("Scegli un video per vedere l'anteprima")
 
         passi = tk.Frame(d4, bg=C["card"])
-        passi.pack(fill="x", pady=(16, 8))
+        passi.pack(fill="x", pady=(14, 6))
         self.l_passi = {}
         for k, (chiave, nome) in enumerate(self.FASI):
             f = tk.Frame(passi, bg=C["card"])
@@ -1557,7 +1557,7 @@ class App:
 
         # dettagli tecnici (nascosti)
         basso = tk.Frame(self.root, bg=C["sfondo"])
-        basso.pack(fill="x", padx=18, pady=(0, 12))
+        basso.pack(fill="x", padx=18, pady=(0, 10))
         self.b_log = tk.Label(basso, text="▸ Dettagli tecnici", bg=C["sfondo"], fg=C["tenue"],
                               font=self.font(11), cursor="hand2")
         self.b_log.pack(anchor="w")
