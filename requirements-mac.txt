@@ -1,0 +1,8 @@
+# macOS (OCR di sistema Apple Vision: niente PyTorch, app leggera)
+opencv-python-headless>=4.8
+numpy
+Pillow>=10.1
+imageio-ffmpeg>=0.5
+pyobjc-core>=10
+pyobjc-framework-Vision>=10
+pyobjc-framework-Quartz>=10

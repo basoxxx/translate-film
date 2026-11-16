@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+build/
+dist/
+*.spec
+*_ITA*.mp4
+*_ITA*.srt
+*_originale*.srt
+*_progresso.json*
+.DS_Store
