@@ -1400,6 +1400,7 @@ class App:
         self.foto = None
         self.fase = None
         self.info_video = None
+        self.trovati, self.ultima = 0, ""
         self.etichette = {f"{v.capitalize()} ({k})": k for k, v in LINGUE.items()}
         self._stile()
         self._costruisci()
@@ -1470,7 +1471,8 @@ class App:
         # 1 - video
         c1, d1 = self._card(sx, 1, "Video")
         c1.pack(fill="x")
-        ttk.Button(d1, text="Scegli video…", style="Secondario.TButton", command=self.scegli).pack(anchor="w")
+        self.b_scegli = ttk.Button(d1, text="Scegli video…", style="Secondario.TButton", command=self.scegli)
+        self.b_scegli.pack(anchor="w")
         self.l_nome = tk.Label(d1, text="Nessun video scelto", bg=C["card"], fg=C["testo"],
                                font=self.font(12, True), anchor="w", justify="left", wraplength=360)
         self.l_nome.pack(fill="x", pady=(8, 0))
@@ -1649,7 +1651,8 @@ class App:
         self.imp.update({"lingua": lingua, "motore": self.v_motore.get(), "modello": modello,
                          "modo": self.v_modo.get(), "posizione": self.v_pos.get()})
         salva_impostazioni(self.imp)
-        for b, st in ((self.b_avvia, "disabled"), (self.b_ferma, "normal"), (self.b_mostra, "disabled")):
+        for b, st in ((self.b_avvia, "disabled"), (self.b_ferma, "normal"), (self.b_mostra, "disabled"),
+                      (self.b_scegli, "disabled")):
             b.configure(state=st)
         self.log.delete("1.0", "end")
         self.risultato = None
@@ -1731,6 +1734,7 @@ class App:
                     self._dettaglio()
                 elif tipo == "fine":
                     self.risultato = a[0]
+                    self.b_scegli.configure(state="normal")
                     self.b_avvia.configure(state="normal")
                     self.b_ferma.configure(state="disabled")
                     if a[0]:
@@ -1744,6 +1748,7 @@ class App:
                         self.l_stato.configure(text="Nessun sottotitolo trovato in questo video.", fg=C["testo"])
                 elif tipo == "errore":
                     self._imposta_fase(self.fase, errore=True)
+                    self.b_scegli.configure(state="normal")
                     self.b_avvia.configure(state="normal")
                     self.b_ferma.configure(state="disabled")
                     self.l_stato.configure(text="Si è verificato un problema", fg=C["errore"])
