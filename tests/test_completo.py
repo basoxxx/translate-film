@@ -151,6 +151,8 @@ def leggi_srt(percorso):
     voci = []
     for blocco in open(percorso, encoding="utf-8").read().strip().split("\n\n"):
         r = blocco.split("\n")
+        if len(r) < 3:
+            continue
         a, b = r[1].split(" --> ")
         sec = lambda x: int(x[:2]) * 3600 + int(x[3:5]) * 60 + float(x[6:].replace(",", "."))
         testo = " ".join(r[2:])
@@ -161,6 +163,8 @@ def leggi_srt(percorso):
 def durata(video):
     r = subprocess.run([trova_ffmpeg(), "-hide_banner", "-i", video], capture_output=True, text=True)
     m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", r.stderr)
+    if not m:
+        return 0.0, False
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)), "Audio:" in r.stderr
 
 
@@ -174,6 +178,9 @@ def main():
     cartella = a.cartella or tempfile.mkdtemp(prefix="test_traduttore_")
     os.makedirs(cartella, exist_ok=True)
     video = os.path.join(cartella, "prova_fr.mp4")
+    for vecchio in os.listdir(cartella):          # niente risultati di esecuzioni precedenti
+        if vecchio.startswith("prova_fr"):
+            os.remove(os.path.join(cartella, vecchio))
     print("Creo il video di prova...", flush=True)
     crea_video(video)
 
@@ -184,23 +191,28 @@ def main():
     cmd = [a.eseguibile] if a.eseguibile else [sys.executable, PROGRAMMA]
     cmd += [video, "--lingua", "fr", "--url", f"http://127.0.0.1:{porta}", "--ocr", a.ocr]
     print("Eseguo:", " ".join(cmd), flush=True)
-    r = subprocess.run(cmd)
     errori = []
-    if r.returncode != 0:
-        errori.append(f"il programma è uscito con codice {r.returncode}")
+    try:
+        r = subprocess.run(cmd, timeout=1800)
+        if r.returncode != 0:
+            errori.append(f"il programma è uscito con codice {r.returncode}")
+    except subprocess.TimeoutExpired:
+        errori.append("il programma non ha finito entro 30 minuti (bloccato?)")
 
     srt = os.path.join(cartella, "prova_fr_ITA.srt")
     mp4 = os.path.join(cartella, "prova_fr_ITA.mp4")
     if not os.path.exists(srt):
         raise SystemExit("FALLITO: nessun file .srt creato\n" + "\n".join(errori))
     voci = leggi_srt(srt)
+    if not voci:
+        raise SystemExit("FALLITO: il file .srt è vuoto\n" + "\n".join(errori))
     print(f"\n{len(voci)} sottotitoli nel file .srt (attesi {len(FRASI)}):")
     trovate = 0
     for testo, ini, fin, pos in FRASI:
         migliore = max(voci, key=lambda v: difflib.SequenceMatcher(None, norm(v[2]), norm("[IT] " + testo)).ratio()
                        if min(v[1], fin) > max(v[0], ini) and v[3] == pos else 0)
         somi = difflib.SequenceMatcher(None, norm(migliore[2]), norm("[IT] " + testo)).ratio()
-        ok = (somi > 0.75 and migliore[3] == pos and abs(migliore[0] - ini) < 0.8
+        ok = (somi > 0.75 and migliore[2].startswith("[IT]") and migliore[3] == pos and abs(migliore[0] - ini) < 0.8
               and abs(migliore[1] - fin) < 0.8)
         trovate += ok
         print(f"  {'OK ' if ok else 'NO '} [{pos:5s}] {ini:>4.1f}-{fin:<4.1f}s  {testo!r:38s} -> "
@@ -216,7 +228,10 @@ def main():
         errori.append("video tradotto non creato")
     else:
         d, audio = durata(mp4)
+        _, audio_orig = durata(video)
         print(f"\nVideo tradotto: {d:.1f}s, audio: {'sì' if audio else 'no'}")
+        if audio_orig and not audio:
+            errori.append("l'audio originale è andato perso")
         if abs(d - DURATA) > 1:
             errori.append(f"durata del video sbagliata: {d:.1f}s invece di {DURATA}s")
         # nel fotogramma a 15s la scritta in alto deve essere stata sostituita

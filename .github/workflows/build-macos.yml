@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   test-linux:
@@ -60,13 +64,16 @@ jobs:
         run: python tests/test_completo.py --ocr vision --cartella test-script
       - name: Build dell'app
         run: ./build_mac.sh
-      - name: Test dell'app compilata
+      - name: Test dell'app compilata (con l'ffmpeg incluso nell'app)
+        env:
+          TRADUTTORE_FFMPEG: incluso
         run: |
           python tests/test_completo.py --ocr vision --cartella test-app \
             --eseguibile "dist/Traduttore Sottotitoli.app/Contents/MacOS/Traduttore Sottotitoli"
       - name: Pacchetti (zip + dmg)
         run: |
           NOME="TraduttoreSottotitoli-macOS-${{ matrix.arch }}"
+          echo "${{ matrix.arch }}: richiede macOS $(cat dist/MINIMO.txt) o successivo" > "minimo-${{ matrix.arch }}.txt"
           ditto -c -k --sequesterRsrc --keepParent "dist/Traduttore Sottotitoli.app" "$NOME.zip"
           mkdir dmg && cp -R "dist/Traduttore Sottotitoli.app" dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname "Traduttore Sottotitoli" -srcfolder dmg -ov -format UDZO "$NOME.dmg"
@@ -77,6 +84,7 @@ jobs:
           path: |
             TraduttoreSottotitoli-macOS-*.dmg
             TraduttoreSottotitoli-macOS-*.zip
+            minimo-*.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -88,16 +96,35 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-mac, test-linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: TraduttoreSottotitoli-macOS-*
           merge-multiple: true
+      - name: Note della release
+        run: |
+          {
+            echo "## Download per Mac"
+            echo
+            echo "- **Apple Silicon** (M1, M2, M3, M4…): \`TraduttoreSottotitoli-macOS-apple-silicon.dmg\`"
+            echo "- **Intel**: \`TraduttoreSottotitoli-macOS-intel.dmg\`"
+            echo
+            for f in minimo-*.txt; do echo "- $(cat "$f")"; done
+            echo
+            echo "Alla prima apertura macOS chiede conferma (app non firmata da Apple): vedi il README."
+            echo "Serve anche [Ollama](https://ollama.com/download): il modello AI si scarica da solo al primo uso."
+          } > NOTE.md
+          cat NOTE.md
       - name: Crea la release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -lh
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Traduttore Sottotitoli $GITHUB_REF_NAME" \
-            --notes "App per Mac: scegli **apple-silicon** (M1/M2/M3/M4) oppure **intel**. Vedi il README per la prima apertura." \
-            TraduttoreSottotitoli-macOS-*
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber TraduttoreSottotitoli-macOS-*
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Traduttore Sottotitoli $GITHUB_REF_NAME" \
+              --notes-file NOTE.md TraduttoreSottotitoli-macOS-*
+          fi

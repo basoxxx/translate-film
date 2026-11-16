@@ -221,9 +221,10 @@ class Zona:
 def trova_ffmpeg():
     """ffmpeg di sistema, oppure quello incluso nel pacchetto imageio-ffmpeg
     (le app Mac non vedono il PATH del terminale, quindi lo includiamo)."""
-    for c in (shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
-        if c and os.path.isfile(c):
-            return c
+    if os.environ.get("TRADUTTORE_FFMPEG") != "incluso":
+        for c in (shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+            if c and os.path.isfile(c):
+                return c
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
@@ -391,6 +392,7 @@ def crea_easyocr(lingua):
 
 
 def crea_ocr(lingua, motore_ocr="auto"):
+    errore_vision = None
     if motore_ocr == "vision" or (motore_ocr == "auto" and sys.platform == "darwin"):
         try:
             r = OcrVision(lingua)
@@ -399,12 +401,15 @@ def crea_ocr(lingua, motore_ocr="auto"):
         except Exception as e:
             if motore_ocr == "vision":
                 raise RuntimeError(f"OCR del Mac non disponibile: {e}") from None
+            errore_vision = e
             LOG(f"OCR del Mac non utilizzabile ({e}): provo EasyOCR...")
     try:
         return crea_easyocr(lingua)
     except ImportError:
-        raise RuntimeError("Nessun OCR disponibile: installa EasyOCR (pip install easyocr) "
-                           "oppure, su Mac, usa macOS 12 o successivo.") from None
+        if errore_vision:
+            raise RuntimeError(f"L'OCR del Mac non può leggere questa lingua ({errore_vision}). "
+                               f"Aggiorna macOS: le versioni più recenti supportano più lingue.") from None
+        raise RuntimeError("Nessun OCR disponibile: installa EasyOCR (pip install easyocr).") from None
 
 
 def ocr_area(reader, crop, conf_min, statici=()):
@@ -767,7 +772,9 @@ def avvia_ollama(url):
         return True
     if not url_locale(url):
         return False
-    if sys.platform == "darwin" and os.path.isdir("/Applications/Ollama.app"):
+    m = re.search(r":(\d+)", url.split("//")[-1])
+    porta = m.group(1) if m else "11434"
+    if sys.platform == "darwin" and os.path.isdir("/Applications/Ollama.app") and porta == "11434":
         LOG("Ollama è spento: lo avvio...")
         subprocess.Popen(["open", "-a", "Ollama"])
     else:
@@ -777,47 +784,77 @@ def avvia_ollama(url):
         LOG("Ollama è spento: lo avvio...")
         extra = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
                  if os.name == "nt" else {"start_new_session": True})
-        subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **extra)
+        env = dict(os.environ, OLLAMA_HOST=f"127.0.0.1:{porta}")
+        subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, **extra)
     for _ in range(40):
+        controlla_stop()
         time.sleep(1)
         if ollama_disponibile(url):
             return True
     return False
 
 
+def nome_modello(x):
+    """'qwen2.5' -> 'qwen2.5:latest', 'library/Qwen2.5:7B ' -> 'qwen2.5:7b'"""
+    x = x.strip().lower()
+    for pre in ("registry.ollama.ai/", "library/"):
+        if x.startswith(pre):
+            x = x[len(pre):]
+    return x if ":" in x.rsplit("/", 1)[-1] else x + ":latest"
+
+
 def modello_presente(info, modello):
-    nomi = [m["name"] for m in info.get("models", [])]
-    return modello in nomi or modello + ":latest" in nomi
+    nomi = {nome_modello(m.get("name") or m.get("model", "")) for m in info.get("models", [])}
+    return nome_modello(modello) in nomi
 
 
 def scarica_modello(modello, url, progresso=None):
     """Scarica il modello AI da Ollama mostrando l'avanzamento (solo la prima volta)."""
     LOG(f"Il modello '{modello}' non è ancora sul computer: lo scarico ora (solo la prima volta, "
         f"alcuni GB: può richiedere un po').")
-    dati = json.dumps({"model": modello, "stream": True}).encode()
+    dati = json.dumps({"model": modello.strip(), "stream": True}).encode()
     req = urllib.request.Request(url.rstrip("/") + "/api/pull", data=dati,
                                  headers={"Content-Type": "application/json"})
+    righe = queue.Queue()
+
+    def leggi():
+        # in un thread a parte: così "Interrompi" funziona anche se Ollama resta in silenzio
+        # a lungo (es. mentre verifica il file scaricato)
+        try:
+            with urllib.request.urlopen(req, timeout=3600) as r:
+                for riga in r:
+                    righe.put(("riga", riga))
+            righe.put(("fine", None))
+        except urllib.error.HTTPError as e:
+            righe.put(("errore", f"{e.code}: {e.read().decode(errors='ignore')[:200]}"))
+        except Exception as e:
+            righe.put(("errore", str(e)))
+
+    threading.Thread(target=leggi, daemon=True).start()
     ultimo = 0
-    try:
-        with urllib.request.urlopen(req, timeout=3600) as r:
-            for riga in r:
-                controlla_stop()
-                if not riga.strip():
-                    continue
-                j = json.loads(riga)
-                if "error" in j:
-                    raise RuntimeError(f"download del modello fallito: {j['error']}")
-                tot, fatto = j.get("total"), j.get("completed")
-                if tot and fatto and progresso and time.time() - ultimo > 0.5:
-                    progresso(fatto / tot * 0.05, f"Scarico il modello AI: {fatto / tot * 100:.0f}% "
-                                                  f"di {tot / 1e9:.1f} GB")
-                    ultimo = time.time()
-                if j.get("status") == "success":
-                    LOG("Modello scaricato.")
-                    return
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"download del modello fallito ({e.code}): "
-                           f"{e.read().decode(errors='ignore')[:200]}") from None
+    while True:
+        controlla_stop()
+        try:
+            tipo, riga = righe.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if tipo == "errore":
+            raise RuntimeError(f"download del modello fallito ({riga})")
+        if tipo == "fine":
+            return
+        if not riga.strip():
+            continue
+        j = json.loads(riga)
+        if "error" in j:
+            raise RuntimeError(f"download del modello fallito: {j['error']}")
+        tot, fatto = j.get("total"), j.get("completed")
+        if tot and fatto and progresso and time.time() - ultimo > 0.5:
+            progresso(fatto / tot * 0.05, f"Scarico il modello AI: {fatto / tot * 100:.0f}% "
+                                          f"di {tot / 1e9:.1f} GB")
+            ultimo = time.time()
+        if j.get("status") == "success":
+            LOG("Modello scaricato.")
+            return
 
 
 def prepara_ollama(url, modello, progresso=None, obbligatorio=True):
@@ -923,7 +960,7 @@ def traduci_tutti(sottotitoli, lingua, motore, modello, url, prog, progresso):
     if motore == "ollama":
         prepara_ollama(url, modello, None, obbligatorio=True)
     d = prog.dati
-    chiave = f"{lingua}|{motore}|{modello if motore == 'ollama' else ''}"
+    chiave = f"{lingua}|{motore}|{nome_modello(modello) if motore == 'ollama' else ''}"
     cache = d.setdefault("traduzioni", {}).setdefault(chiave, {})
 
     ordine = list(dict.fromkeys(s.testo for s in sottotitoli))
@@ -1234,6 +1271,7 @@ def elabora(video, lingua="fr", motore="ollama", modello="qwen2.5:7b",
     prova=N: elabora solo i primi N secondi (per controllare il risultato in fretta)."""
     FERMA.clear()
     t_inizio = time.time()
+    modello = (modello or "").strip()
     info = leggi_info(video)
     w, h, fps, tot = info
     LOG(f"Traduttore Sottotitoli {VERSIONE}")
@@ -1759,6 +1797,8 @@ def main():
     p.add_argument("--solo-srt", action="store_true", help="crea solo il file .srt italiano")
     p.add_argument("--versione", action="version", version=VERSIONE)
     a = p.parse_args(argv)
+    if a.prova < 0 or not 0 < a.intervallo <= 5 or not 0 < a.zona <= 0.5 or not 0 < a.conf < 1:
+        p.error("valori non validi: --prova >= 0, 0 < --intervallo <= 5, 0 < --zona <= 0.5, 0 < --conf < 1")
     if not os.path.isfile(a.video):
         p.error(f"file non trovato: {a.video}")
     try:

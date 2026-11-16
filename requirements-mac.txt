@@ -1,6 +1,7 @@
 # macOS (OCR di sistema Apple Vision: niente PyTorch, app leggera)
-opencv-python-headless>=4.8
-numpy
+# versioni scelte per funzionare anche su macOS meno recenti (numpy 2 richiede macOS 14)
+opencv-python-headless>=4.8,<4.11
+numpy>=1.26,<2
 Pillow>=10.1
 imageio-ffmpeg>=0.5
 pyobjc-core>=10
