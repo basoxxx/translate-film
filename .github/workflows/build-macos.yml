@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      versione:
+        description: "Per pubblicare una release scrivi la versione (es. v1.1.0); vuoto = solo build"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -93,7 +98,7 @@ jobs:
 
   release:
     name: Pubblica release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.versione != '')
     needs: [build-mac, test-linux]
     runs-on: ubuntu-latest
     permissions:
@@ -120,11 +125,13 @@ jobs:
       - name: Crea la release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSIONE: ${{ inputs.versione }}
         run: |
           ls -lh
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber TraduttoreSottotitoli-macOS-*
+          TAG="${VERSIONE:-$GITHUB_REF_NAME}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber TraduttoreSottotitoli-macOS-*
           else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Traduttore Sottotitoli $GITHUB_REF_NAME" \
-              --notes-file NOTE.md TraduttoreSottotitoli-macOS-*
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Traduttore Sottotitoli $TAG" --notes-file NOTE.md TraduttoreSottotitoli-macOS-*
           fi

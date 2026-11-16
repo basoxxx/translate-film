@@ -124,7 +124,9 @@ Il programma si ferma con un messaggio chiaro invece di dare un risultato sbagli
 - `build_mac.sh`: crea `Traduttore Sottotitoli.app` con PyInstaller per l'architettura del Mac in uso.
 - `.github/workflows/build-macos.yml`: per ogni push compila e **prova l'app compilata** su Mac Intel e Apple Silicon; con un tag `v*` pubblica la release con `.dmg` e `.zip`.
 
-Per creare una nuova release:
+Per pubblicare una nuova release (con `.dmg` per Intel e Apple Silicon):
+- **dal sito GitHub:** scheda *Actions* → *Build macOS (Intel + Apple Silicon)* → *Run workflow* → scrivi la versione (es. `v1.1.0`) → *Run workflow*;
+- **oppure da terminale**, con un tag:
 
 ```bash
 git tag v1.1.0
