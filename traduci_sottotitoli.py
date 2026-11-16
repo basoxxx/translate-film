@@ -65,7 +65,24 @@ SOGLIA_LUMINOSO = 190
 MAX_RIUSI = 4                 # dopo N riusi consecutivi rifà comunque l'OCR (sicurezza)
 
 LOG = print                   # sostituito dalla finestra grafica
+EVENTO = None                 # la finestra grafica riceve qui fasi, anteprime, traduzioni
 FERMA = threading.Event()     # premuto "Interrompi"
+
+
+def notifica(tipo, *dati):
+    if EVENTO:
+        try:
+            EVENTO(tipo, *dati)
+        except Exception:
+            pass
+
+
+def anteprima(frame, larghezza=640):
+    """Copia rimpicciolita RGB di un fotogramma, da mostrare nella finestra."""
+    h, w = frame.shape[:2]
+    scala = larghezza / w
+    piccolo = cv2.resize(frame, (larghezza, max(1, int(h * scala))), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(piccolo, cv2.COLOR_BGR2RGB), scala
 
 
 class Interrotto(Exception):
@@ -625,6 +642,7 @@ def trova_sottotitoli(video, get_reader, info, analisi, zone, intervallo, conf_m
     lettori = {z.nome: LettoreZona(reader, analisi, conf_min) for z in zone}
     cron = Cronometro("Lettura sottotitoli", progresso, 0.0, 0.5, f0=i / tot)
     ultimo_salv = time.time()
+    ultima_anteprima = 0.0
 
     def salva_checkpoint(pross):
         # salva sia i sottotitoli finiti che quelli ancora "aperti": alla ripresa si
@@ -672,6 +690,18 @@ def trova_sottotitoli(video, get_reader, info, analisi, zone, intervallo, conf_m
                             sottotitoli.append(cor)
                             cor = None
                     correnti[z.nome] = cor
+                if EVENTO and time.time() - ultima_anteprima > 2:
+                    ultima_anteprima = time.time()
+                    img, sc = anteprima(frame)
+                    for z in zone:      # fasce controllate
+                        cv2.rectangle(img, (2, int(z.y0 * sc) + 2), (img.shape[1] - 3, int(z.y1 * sc) - 3),
+                                      (120, 160, 255), 1)
+                    for c in correnti.values():     # sottotitoli riconosciuti in questo momento
+                        if c and c.box:
+                            b = [int(v * sc) for v in c.box]
+                            cv2.rectangle(img, (b[0] - 4, b[1] - 4), (b[2] + 4, b[3] + 4), (40, 220, 90), 2)
+                    notifica("frame", img)
+                    notifica("trovati", len(sottotitoli) + sum(1 for c in correnti.values() if c))
                 pross = i + passo
                 cron.aggiorna(i / tot)
                 if time.time() - ultimo_salv > 30:
@@ -930,6 +960,7 @@ def traduci_tutti(sottotitoli, lingua, motore, modello, url, prog, progresso):
         for orig, trad in zip(blocco, ris):
             cache[orig] = trad
             LOG(f"  {orig}  ->  {trad}")
+            notifica("traduzione", orig, trad)
         prog.salva()
         cron.aggiorna((k + len(blocco)) / max(1, len(da_fare)))
 
@@ -1081,6 +1112,7 @@ def riscrivi_video(video, uscita, sottotitoli, info, modo, progresso):
     cron = Cronometro("Creazione video", progresso, 0.6, 0.4)
     attivi, overlay, ptr, i = [], {}, 0, 0
     fine_regolare = pipe_rotta = False
+    ultima_anteprima = 0.0
     try:
         while True:
             ok, frame = cap.read() if i < tot else (False, None)
@@ -1101,6 +1133,9 @@ def riscrivi_video(video, uscita, sottotitoli, info, modo, progresso):
                 if k not in overlay:
                     overlay[k] = prepara_overlay(subs[k], w, h, font)
                 incolla(frame, *overlay[k])
+            if EVENTO and attivi and time.time() - ultima_anteprima > 1.5:
+                ultima_anteprima = time.time()
+                notifica("frame", anteprima(frame)[0])
             try:
                 scrivi(frame)
             except OSError:          # BrokenPipe (Linux/Mac) o EINVAL (Windows): ffmpeg è uscito
@@ -1225,6 +1260,7 @@ def elabora(video, lingua="fr", motore="ollama", modello="qwen2.5:7b",
         if motore == "ollama" and not prog.dati.get("ocr_completo"):
             # controlla SUBITO Ollama e il modello (meglio saperlo ora che dopo un'ora di lettura)
             prepara_ollama(url, modello, progresso, obbligatorio=False)
+        notifica("fase", "analisi")
         if "analisi" not in prog.dati:
             prog.dati["analisi"] = analizza_video(video, get_reader(), info, conf_min, progresso)
             prog.salva()
@@ -1235,6 +1271,7 @@ def elabora(video, lingua="fr", motore="ollama", modello="qwen2.5:7b",
         if not prog.dati.get("ocr_completo"):
             stima_tempi(info, analisi, zone, intervallo, motore, solo_srt)
 
+        notifica("fase", "lettura")
         sottotitoli = trova_sottotitoli(video, get_reader, info, analisi, zone, intervallo,
                                         conf_min, prog, progresso)
         if not sottotitoli:
@@ -1242,15 +1279,19 @@ def elabora(video, lingua="fr", motore="ollama", modello="qwen2.5:7b",
                 "o ad allargare la fascia (--zona 0.5).")
             prog.elimina()
             return None
+        notifica("trovati", len(sottotitoli))
         salva_srt(sottotitoli, srt_orig, campo="testo")
+        notifica("fase", "traduzione")
         traduci_tutti(sottotitoli, lingua, motore, modello, url, prog, progresso)
         salva_srt(sottotitoli, srt_ita)
         LOG(f"Sottotitoli italiani salvati: {srt_ita}")
         risultato = srt_ita
         if not solo_srt:
+            notifica("fase", "video")
             risultato = riscrivi_video(video, uscita, sottotitoli, info, modo, progresso)
             LOG(f"Video tradotto: {risultato}")
         prog.elimina()
+        notifica("fase", "fatto")
         LOG(f"FATTO! Tempo impiegato: {fmt_durata(time.time() - t_inizio)}")
         if progresso:
             progresso(1.0, "Finito!")
@@ -1290,157 +1331,396 @@ def mostra_nel_finder(percorso):
         pass
 
 
-def gui():
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+class App:
+    """Finestra principale."""
+    C = dict(sfondo="#f2f3f8", card="#ffffff", bordo="#e2e5ee", testo="#111827", tenue="#6b7280",
+             accento="#4f46e5", accento_scuro="#3730a3", accento_chiaro="#eef2ff", ok="#16a34a",
+             errore="#dc2626", testata="#1e1b4b", testata2="#c7d2fe", schermo="#0f172a")
+    FASI = [("analisi", "Analisi"), ("lettura", "Lettura"), ("traduzione", "Traduzione"),
+            ("video", "Video")]
+    MODELLI = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b", "llama3.1:8b", "gemma2:9b", "mistral-nemo"]
+    PREVIEW = (600, 338)
 
-    imp = carica_impostazioni()
-    etichette = {f"{k} - {v}": k for k, v in LINGUE.items()}
-    da_codice = {v: k for k, v in etichette.items()}
+    def __init__(self):
+        import tkinter as tk
+        from tkinter import filedialog, font as tkfont, messagebox, ttk
+        from PIL import Image as PILImage, ImageTk
+        self.tk, self.ttk, self.fd, self.mb = tk, ttk, filedialog, messagebox
+        self.PILImage, self.ImageTk = PILImage, ImageTk
+        self.imp = carica_impostazioni()
+        self.root = tk.Tk()
+        self.root.title("Traduttore Sottotitoli")
+        self.root.geometry("1120x780")
+        self.root.minsize(1020, 720)
+        self.root.configure(bg=self.C["sfondo"])
+        fam = tkfont.nametofont("TkDefaultFont").actual("family")
+        self.font = lambda dim, grassetto=False: (fam, dim, "bold" if grassetto else "normal")
+        self.eventi = queue.Queue()     # il lavoro gira in un altro thread: la finestra legge da qui
+        self.lavoratore = None
+        self.risultato = None
+        self.foto = None
+        self.fase = None
+        self.info_video = None
+        self.etichette = {f"{v.capitalize()} ({k})": k for k, v in LINGUE.items()}
+        self._stile()
+        self._costruisci()
+        self.root.protocol("WM_DELETE_WINDOW", self.chiudi)
+        if self.imp.get("video") and os.path.isfile(self.imp["video"]):
+            self.carica_video(self.imp["video"])
+        self._leggi_eventi()
 
-    root = tk.Tk()
-    root.title(f"Traduttore Sottotitoli -> Italiano (AI locale)  v{VERSIONE}")
-    root.geometry("860x680")
-    v_video = tk.StringVar(value=imp.get("video", ""))
-    v_lingua = tk.StringVar(value=da_codice.get(imp.get("lingua", "fr"), "fr - francese"))
-    v_motore = tk.StringVar(value=imp.get("motore", "ollama"))
-    v_modello = tk.StringVar(value=imp.get("modello", "qwen2.5:7b"))
-    v_modo = tk.StringVar(value=imp.get("modo", "box"))
-    v_pos = tk.StringVar(value=imp.get("posizione", "auto"))
-    v_srt = tk.BooleanVar(value=False)
-    v_prova = tk.BooleanVar(value=False)
-    v_stato = tk.StringVar(value="Pronto")
-    eventi = queue.Queue()      # il lavoro gira in un altro thread: la GUI legge da qui
-    lavoratore, risultato = [], []
+    # ---------------------------------------------------------------- aspetto
+    def _stile(self):
+        C, st = self.C, self.ttk.Style(self.root)
+        st.theme_use("clam")
+        st.configure(".", background=C["card"], foreground=C["testo"], font=self.font(12))
+        st.configure("TCombobox", fieldbackground="#f9fafb", background="#f9fafb", bordercolor=C["bordo"],
+                     arrowcolor=C["tenue"], padding=5)
+        st.map("TCombobox", fieldbackground=[("readonly", "#f9fafb")], bordercolor=[("focus", C["accento"])])
+        st.configure("TCheckbutton", background=C["card"], font=self.font(12))
+        st.map("TCheckbutton", background=[("active", C["card"])],
+               indicatorcolor=[("selected", C["accento"]), ("!selected", "#ffffff")])
+        st.configure("Primario.TButton", background=C["accento"], foreground="#ffffff", borderwidth=0,
+                     focusthickness=0, font=self.font(15, True), padding=(18, 13))
+        st.map("Primario.TButton", background=[("disabled", "#c7c9d9"), ("active", C["accento_scuro"])],
+               foreground=[("disabled", "#f3f4f6")])
+        st.configure("Secondario.TButton", background=C["accento_chiaro"], foreground=C["accento_scuro"],
+                     borderwidth=0, focusthickness=0, font=self.font(12, True), padding=(12, 8))
+        st.map("Secondario.TButton", background=[("disabled", "#f3f4f6"), ("active", "#e0e7ff")],
+               foreground=[("disabled", "#b0b4c3")])
+        st.configure("Barra.Horizontal.TProgressbar", troughcolor="#e5e7eb", background=C["accento"],
+                     bordercolor="#e5e7eb", lightcolor=C["accento"], darkcolor=C["accento"], thickness=12)
+        st.configure("Ok.Horizontal.TProgressbar", troughcolor="#e5e7eb", background=C["ok"],
+                     bordercolor="#e5e7eb", lightcolor=C["ok"], darkcolor=C["ok"], thickness=12)
 
-    f = ttk.Frame(root, padding=10)
-    f.pack(fill="both", expand=True)
-    ttk.Label(f, text="Video:").grid(row=0, column=0, sticky="w")
-    ttk.Entry(f, textvariable=v_video, width=70).grid(row=0, column=1, sticky="we")
+    def _card(self, genitore, numero, titolo):
+        tk, C = self.tk, self.C
+        esterno = tk.Frame(genitore, bg=C["card"], highlightbackground=C["bordo"], highlightthickness=1)
+        testa = tk.Frame(esterno, bg=C["card"])
+        testa.pack(fill="x", padx=18, pady=(14, 6))
+        if numero:
+            tk.Label(testa, text=str(numero), bg=C["accento"], fg="#ffffff", font=self.font(11, True),
+                     width=2).pack(side="left", padx=(0, 10))
+        tk.Label(testa, text=titolo, bg=C["card"], fg=C["testo"], font=self.font(14, True)).pack(side="left")
+        dentro = tk.Frame(esterno, bg=C["card"])
+        dentro.pack(fill="both", expand=True, padx=18, pady=(4, 16))
+        return esterno, dentro
 
-    def scegli():
-        cartella = os.path.dirname(v_video.get()) if v_video.get() else os.path.expanduser("~")
-        scelto = filedialog.askopenfilename(initialdir=cartella, filetypes=[
-            ("Video", "*.mp4 *.mkv *.avi *.mov *.webm *.m4v *.ts"), ("Tutti", "*.*")])
+    def _costruisci(self):
+        tk, ttk, C = self.tk, self.ttk, self.C
+        # testata
+        testata = tk.Frame(self.root, bg=C["testata"])
+        testata.pack(fill="x")
+        tk.Label(testata, text="🎬  Traduttore Sottotitoli", bg=C["testata"], fg="#ffffff",
+                 font=self.font(20, True)).pack(side="left", padx=(22, 12), pady=(16, 16))
+        tk.Label(testata, text="sottotitoli impressi nel video  →  italiano  ·  AI sul tuo computer",
+                 bg=C["testata"], fg=C["testata2"], font=self.font(12)).pack(side="left", pady=(22, 16))
+        tk.Label(testata, text=f"v{VERSIONE}", bg=C["testata"], fg=C["testata2"],
+                 font=self.font(11)).pack(side="right", padx=22)
+
+        corpo = tk.Frame(self.root, bg=C["sfondo"])
+        corpo.pack(fill="both", expand=True, padx=18, pady=16)
+        corpo.columnconfigure(0, minsize=400)
+        corpo.columnconfigure(1, weight=1)
+        corpo.rowconfigure(0, weight=1)
+        sx = tk.Frame(corpo, bg=C["sfondo"])
+        sx.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        dx = tk.Frame(corpo, bg=C["sfondo"])
+        dx.grid(row=0, column=1, sticky="nsew")
+
+        # 1 - video
+        c1, d1 = self._card(sx, 1, "Video")
+        c1.pack(fill="x")
+        ttk.Button(d1, text="Scegli video…", style="Secondario.TButton", command=self.scegli).pack(anchor="w")
+        self.l_nome = tk.Label(d1, text="Nessun video scelto", bg=C["card"], fg=C["testo"],
+                               font=self.font(12, True), anchor="w", justify="left", wraplength=360)
+        self.l_nome.pack(fill="x", pady=(10, 0))
+        self.l_info = tk.Label(d1, text="mp4, mkv, mov, avi…", bg=C["card"], fg=C["tenue"],
+                               font=self.font(11), anchor="w")
+        self.l_info.pack(fill="x")
+
+        # 2 - impostazioni
+        c2, d2 = self._card(sx, 2, "Impostazioni")
+        c2.pack(fill="x", pady=14)
+        imp = self.imp
+        inv = {v: k for k, v in self.etichette.items()}
+        self.v_lingua = tk.StringVar(value=inv.get(imp.get("lingua", "fr"), "Francese (fr)"))
+        self.v_pos = tk.StringVar(value=imp.get("posizione", "auto"))
+        self.v_modo = tk.StringVar(value=imp.get("modo", "box"))
+        self.v_motore = tk.StringVar(value=imp.get("motore", "ollama"))
+        self.v_modello = tk.StringVar(value=imp.get("modello", "qwen2.5:7b"))
+        self.v_prova = tk.BooleanVar(value=False)
+        self.v_srt = tk.BooleanVar(value=False)
+        righe = [
+            ("Lingua dei sottotitoli", ttk.Combobox(d2, textvariable=self.v_lingua, state="readonly",
+                                                     values=list(self.etichette), width=20)),
+            ("Posizione", ttk.Combobox(d2, textvariable=self.v_pos, state="readonly", width=20,
+                                       values=["auto", "basso", "alto"])),
+            ("Copri l'originale con", ttk.Combobox(d2, textvariable=self.v_modo, state="readonly", width=20,
+                                                   values=["box", "inpaint", "sfoca"])),
+            ("Modello AI (Ollama)", ttk.Combobox(d2, textvariable=self.v_modello, width=20,
+                                                 values=self.MODELLI)),
+        ]
+        for r, (testo, w) in enumerate(righe):
+            tk.Label(d2, text=testo, bg=C["card"], fg=C["tenue"], font=self.font(12)).grid(
+                row=r, column=0, sticky="w", pady=4, padx=(0, 12))
+            w.grid(row=r, column=1, sticky="ew", pady=4)
+        d2.columnconfigure(1, weight=1)
+        tk.Label(d2, text="auto = controlla sopra e sotto, anche se cambia da scena a scena.\n"
+                          "Mac/PC con 8 GB di RAM: scegli il modello qwen2.5:3b.",
+                 bg=C["card"], fg=C["tenue"], font=self.font(10), justify="left").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 8))
+        ttk.Checkbutton(d2, text="Prova sui primi 2 minuti", variable=self.v_prova).grid(
+            row=5, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(d2, text="Solo file .srt (non rifare il video)", variable=self.v_srt).grid(
+            row=6, column=0, columnspan=2, sticky="w")
+
+        # 3 - avvio
+        c3, d3 = self._card(sx, 3, "Avvio")
+        c3.pack(fill="x")
+        self.b_avvia = ttk.Button(d3, text="▶   Traduci in italiano", style="Primario.TButton", command=self.avvia)
+        self.b_avvia.pack(fill="x")
+        riga = tk.Frame(d3, bg=C["card"])
+        riga.pack(fill="x", pady=(10, 0))
+        self.b_ferma = ttk.Button(riga, text="■  Interrompi", style="Secondario.TButton",
+                                  command=self.ferma, state="disabled")
+        self.b_ferma.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        self.b_mostra = ttk.Button(riga, text="📂  Mostra risultato", style="Secondario.TButton",
+                                   command=self.mostra, state="disabled")
+        self.b_mostra.pack(side="left", expand=True, fill="x", padx=(5, 0))
+
+        # anteprima + avanzamento
+        c4, d4 = self._card(dx, None, "Anteprima")
+        c4.pack(fill="both", expand=True)
+        pw, ph = self.PREVIEW
+        self.schermo = tk.Canvas(d4, width=pw, height=ph, bg=C["schermo"], highlightthickness=0)
+        self.schermo.pack(fill="x")
+        self._schermo_vuoto("Scegli un video per vedere l'anteprima")
+
+        passi = tk.Frame(d4, bg=C["card"])
+        passi.pack(fill="x", pady=(16, 8))
+        self.l_passi = {}
+        for k, (chiave, nome) in enumerate(self.FASI):
+            f = tk.Frame(passi, bg=C["card"])
+            f.pack(side="left", expand=True, fill="x")
+            pallino = tk.Label(f, text=str(k + 1), width=2, bg="#e5e7eb", fg=C["tenue"], font=self.font(11, True))
+            pallino.pack(side="left")
+            nome_l = tk.Label(f, text=nome, bg=C["card"], fg=C["tenue"], font=self.font(12))
+            nome_l.pack(side="left", padx=6)
+            self.l_passi[chiave] = (pallino, nome_l)
+        self.barra = ttk.Progressbar(d4, maximum=1.0, style="Barra.Horizontal.TProgressbar")
+        self.barra.pack(fill="x", pady=(6, 10))
+        self.l_stato = tk.Label(d4, text="Pronto", bg=C["card"], fg=C["testo"], font=self.font(14, True),
+                                anchor="w")
+        self.l_stato.pack(fill="x")
+        self.l_dettaglio = tk.Label(d4, text="", bg=C["card"], fg=C["tenue"], font=self.font(11),
+                                    anchor="w", justify="left", wraplength=600)
+        self.l_dettaglio.pack(fill="x", pady=(2, 0))
+
+        # dettagli tecnici (nascosti)
+        basso = tk.Frame(self.root, bg=C["sfondo"])
+        basso.pack(fill="x", padx=18, pady=(0, 12))
+        self.b_log = tk.Label(basso, text="▸ Dettagli tecnici", bg=C["sfondo"], fg=C["tenue"],
+                              font=self.font(11), cursor="hand2")
+        self.b_log.pack(anchor="w")
+        self.b_log.bind("<Button-1>", lambda e: self._mostra_log())
+        self.log = tk.Text(basso, height=9, bg="#ffffff", fg=C["testo"], relief="flat",
+                           highlightbackground=C["bordo"], highlightthickness=1, font=("Menlo", 10)
+                           if sys.platform == "darwin" else ("Consolas", 10) if os.name == "nt" else ("Monospace", 9))
+        self.log_visibile = False
+
+    # ---------------------------------------------------------------- aiuti
+    def _mostra_log(self, forza=None):
+        self.log_visibile = (not self.log_visibile) if forza is None else forza
+        if self.log_visibile:
+            self.log.pack(fill="x", pady=(6, 0))
+            self.b_log.configure(text="▾ Dettagli tecnici")
+        else:
+            self.log.pack_forget()
+            self.b_log.configure(text="▸ Dettagli tecnici")
+
+    def _schermo_vuoto(self, testo):
+        pw, ph = self.PREVIEW
+        self.schermo.delete("all")
+        self.schermo.create_text(pw // 2, ph // 2, text=testo, fill="#94a3b8", font=self.font(13))
+
+    def _mostra_immagine(self, rgb):
+        pw, ph = self.PREVIEW
+        w = self.schermo.winfo_width() if self.schermo.winfo_width() > 10 else pw
+        h, wi = rgb.shape[:2]
+        scala = min(w / wi, ph / h)
+        img = self.PILImage.fromarray(rgb).resize((max(1, int(wi * scala)), max(1, int(h * scala))))
+        self.foto = self.ImageTk.PhotoImage(img)
+        self.schermo.delete("all")
+        self.schermo.create_image(w // 2, ph // 2, image=self.foto)
+
+    def _imposta_fase(self, fase, errore=False):
+        C = self.C
+        chiavi = [k for k, _ in self.FASI]
+        attuale = len(chiavi) if fase == "fatto" else (chiavi.index(fase) if fase in chiavi else -1)
+        self.fase = fase
+        for k, chiave in enumerate(chiavi):
+            pallino, nome = self.l_passi[chiave]
+            if k < attuale:
+                pallino.configure(text="✓", bg=C["ok"], fg="#ffffff")
+                nome.configure(fg=C["ok"], font=self.font(12))
+            elif k == attuale:
+                pallino.configure(text=str(k + 1), bg=C["errore"] if errore else C["accento"], fg="#ffffff")
+                nome.configure(fg=C["errore"] if errore else C["accento"], font=self.font(12, True))
+            else:
+                pallino.configure(text=str(k + 1), bg="#e5e7eb", fg=C["tenue"])
+                nome.configure(fg=C["tenue"], font=self.font(12))
+
+    # ---------------------------------------------------------------- azioni
+    def scegli(self):
+        cartella = os.path.dirname(self.imp.get("video", "")) or os.path.expanduser("~")
+        scelto = self.fd.askopenfilename(initialdir=cartella, filetypes=[
+            ("Video", "*.mp4 *.mkv *.avi *.mov *.webm *.m4v *.ts"), ("Tutti i file", "*.*")])
         if scelto:
-            v_video.set(scelto)
+            self.carica_video(scelto)
 
-    ttk.Button(f, text="Scegli...", command=scegli).grid(row=0, column=2)
-
-    def riga(r, testo, widget):
-        ttk.Label(f, text=testo).grid(row=r, column=0, sticky="w")
-        widget.grid(row=r, column=1, sticky="w")
-
-    riga(1, "Lingua sottotitoli:", ttk.Combobox(f, textvariable=v_lingua, values=list(etichette),
-                                                 width=18, state="readonly"))
-    riga(2, "Posizione sottotitoli:", ttk.Combobox(
-        f, textvariable=v_pos, values=["auto", "basso", "alto"], width=10, state="readonly"))
-    riga(3, "Traduttore:", ttk.Combobox(f, textvariable=v_motore, values=["ollama", "argos"],
-                                         width=10, state="readonly"))
-    riga(4, "Modello Ollama:", ttk.Combobox(f, textvariable=v_modello, width=25, values=[
-        "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b", "llama3.1:8b", "gemma2:9b", "mistral-nemo"]))
-    riga(5, "Copri originale con:", ttk.Combobox(f, textvariable=v_modo, values=["box", "inpaint", "sfoca"],
-                                                  width=10, state="readonly"))
-    ttk.Checkbutton(f, text="Prova solo sui primi 2 minuti (per controllare il risultato in fretta)",
-                    variable=v_prova).grid(row=6, column=1, sticky="w")
-    ttk.Checkbutton(f, text="Crea solo il file .srt (non rifare il video)",
-                    variable=v_srt).grid(row=7, column=1, sticky="w")
-    ttk.Label(f, text="auto = controlla sia in alto che in basso (anche se cambia da scena a scena).  "
-                      "qwen2.5:3b = più leggero per Mac/PC con 8 GB di RAM",
-              foreground="gray").grid(row=8, column=1, sticky="w")
-
-    pulsanti = ttk.Frame(f)
-    pulsanti.grid(row=9, column=0, columnspan=3, pady=8)
-    barra = ttk.Progressbar(f, maximum=1.0)
-    barra.grid(row=10, column=0, columnspan=3, sticky="we")
-    ttk.Label(f, textvariable=v_stato, font=("", 11, "bold")).grid(row=11, column=0, columnspan=3, sticky="w")
-    log = tk.Text(f, height=20)
-    log.grid(row=12, column=0, columnspan=3, sticky="nsew")
-    f.columnconfigure(1, weight=1)
-    f.rowconfigure(12, weight=1)
-
-    def leggi_eventi():
+    def carica_video(self, percorso):
         try:
-            while True:
-                tipo, *args = eventi.get_nowait()
-                if tipo == "log":
-                    log.insert("end", str(args[0]) + "\n")
-                    log.see("end")
-                elif tipo == "prog":
-                    barra.configure(value=args[0])
-                    if args[1]:
-                        v_stato.set(args[1])
-                elif tipo == "fine":
-                    b_avvia.configure(state="normal")
-                    b_ferma.configure(state="disabled")
-                    if risultato and risultato[0]:
-                        b_mostra.configure(state="normal")
-        except queue.Empty:
-            pass
-        root.after(100, leggi_eventi)
-
-    def avvia():
-        if not os.path.isfile(v_video.get()):
-            messagebox.showerror("Errore", "Scegli prima un video.")
+            w, h, fps, tot = leggi_info(percorso)
+        except Exception as e:
+            self.mb.showerror("Video non leggibile", str(e))
             return
-        lingua = etichette.get(v_lingua.get(), "fr")
-        salva_impostazioni({"video": v_video.get(), "lingua": lingua, "motore": v_motore.get(),
-                            "modello": v_modello.get().strip(), "modo": v_modo.get(),
-                            "posizione": v_pos.get()})
-        b_avvia.configure(state="disabled")
-        b_ferma.configure(state="normal")
-        b_mostra.configure(state="disabled")
-        log.delete("1.0", "end")
-        risultato.clear()
+        self.info_video = percorso
+        self.imp["video"] = percorso
+        self.l_nome.configure(text=os.path.basename(percorso))
+        self.l_info.configure(text=f"{w}×{h}  ·  {fps:.2f} fps  ·  durata {fmt_tempo(tot / fps)}")
+        cap = cv2.VideoCapture(percorso)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(tot * 0.1))
+        ok, fr = cap.read()
+        cap.release()
+        if ok:
+            self._mostra_immagine(anteprima(fr)[0])
+        self.l_stato.configure(text="Pronto", fg=self.C["testo"])
+        self.l_dettaglio.configure(text="")
+        self.barra.configure(value=0, style="Barra.Horizontal.TProgressbar")
+        self._imposta_fase(None)
+        self.b_mostra.configure(state="disabled")
+
+    def avvia(self):
+        global LOG, EVENTO
+        if not self.info_video or not os.path.isfile(self.info_video):
+            self.mb.showinfo("Manca il video", "Scegli prima un video.")
+            return
+        lingua = self.etichette.get(self.v_lingua.get(), "fr")
+        modello = self.v_modello.get().strip() or "qwen2.5:7b"
+        self.imp.update({"lingua": lingua, "motore": self.v_motore.get(), "modello": modello,
+                         "modo": self.v_modo.get(), "posizione": self.v_pos.get()})
+        salva_impostazioni(self.imp)
+        for b, st in ((self.b_avvia, "disabled"), (self.b_ferma, "normal"), (self.b_mostra, "disabled")):
+            b.configure(state=st)
+        self.log.delete("1.0", "end")
+        self.risultato = None
+        self.barra.configure(value=0, style="Barra.Horizontal.TProgressbar")
+        self.l_stato.configure(text="Avvio…", fg=self.C["testo"])
+        self.l_dettaglio.configure(text="")
+        self.trovati, self.ultima = 0, ""
+        LOG = lambda m: self.eventi.put(("log", m))
+        EVENTO = lambda *a: self.eventi.put(a)
+        argomenti = dict(video=self.info_video, lingua=lingua, motore=self.v_motore.get(), modello=modello,
+                         modo=self.v_modo.get(), posizione=self.v_pos.get(), solo_srt=self.v_srt.get(),
+                         prova=120 if self.v_prova.get() else 0)
 
         def lavoro():
-            global LOG
-            LOG = lambda m: eventi.put(("log", m))
             try:
-                risultato.append(elabora(
-                    v_video.get(), lingua, v_motore.get(), v_modello.get().strip(),
-                    modo=v_modo.get(), posizione=v_pos.get(), solo_srt=v_srt.get(),
-                    prova=120 if v_prova.get() else 0,
-                    progresso=lambda p, m=None: eventi.put(("prog", p, m))))
+                r = elabora(progresso=lambda p, m=None: self.eventi.put(("prog", p, m)), **argomenti)
+                self.eventi.put(("fine", r))
             except Exception as e:
-                eventi.put(("log", f"\nERRORE: {e}\n\nDettagli tecnici:\n{traceback.format_exc()}"))
-                eventi.put(("prog", 0, f"ERRORE: {e}"))
-            eventi.put(("fine",))
+                self.eventi.put(("log", f"\nERRORE: {e}\n\nDettagli tecnici:\n{traceback.format_exc()}"))
+                self.eventi.put(("errore", str(e)))
 
-        th = threading.Thread(target=lavoro, daemon=True)
-        lavoratore[:] = [th]
-        th.start()
+        self.lavoratore = threading.Thread(target=lavoro, daemon=True)
+        self.lavoratore.start()
 
-    def ferma():
+    def ferma(self):
         FERMA.set()
-        v_stato.set("Interruzione in corso (salvo i progressi)...")
+        self.l_stato.configure(text="Interruzione in corso (salvo i progressi)…")
 
-    def chiudi():
-        if lavoratore and lavoratore[0].is_alive():
-            if not messagebox.askyesno("Chiudere?", "Il lavoro è in corso. Interrompo e salvo i progressi?"):
+    def mostra(self):
+        if self.risultato:
+            mostra_nel_finder(self.risultato)
+
+    def chiudi(self):
+        if self.lavoratore and self.lavoratore.is_alive():
+            if not self.mb.askyesno("Chiudere?", "Il lavoro è in corso. Interrompo e salvo i progressi?"):
                 return
             FERMA.set()
-            v_stato.set("Salvo i progressi e chiudo...")
+            self.l_stato.configure(text="Salvo i progressi e chiudo…")
 
             def aspetta():
-                if lavoratore[0].is_alive():
-                    root.after(200, aspetta)
+                if self.lavoratore.is_alive():
+                    self.root.after(200, aspetta)
                 else:
-                    root.destroy()
+                    self.root.destroy()
             aspetta()
         else:
-            root.destroy()
+            self.root.destroy()
 
-    b_avvia = ttk.Button(pulsanti, text="▶  TRADUCI IN ITALIANO", command=avvia)
-    b_avvia.pack(side="left", padx=5)
-    b_ferma = ttk.Button(pulsanti, text="■  Interrompi", command=ferma, state="disabled")
-    b_ferma.pack(side="left", padx=5)
-    b_mostra = ttk.Button(pulsanti, text="📂  Mostra risultato", state="disabled",
-                          command=lambda: risultato and risultato[0] and mostra_nel_finder(risultato[0]))
-    b_mostra.pack(side="left", padx=5)
-    root.protocol("WM_DELETE_WINDOW", chiudi)
-    leggi_eventi()
-    root.mainloop()
+    def _dettaglio(self):
+        parti = []
+        if self.trovati:
+            parti.append(f"Sottotitoli trovati: {self.trovati}")
+        if self.ultima:
+            parti.append(self.ultima)
+        self.l_dettaglio.configure(text="     ".join(parti[:1]) + ("\n" + parti[1] if len(parti) > 1 else ""))
+
+    def _leggi_eventi(self):
+        C = self.C
+        try:
+            for _ in range(200):
+                tipo, *a = self.eventi.get_nowait()
+                if tipo == "log":
+                    self.log.insert("end", str(a[0]) + "\n")
+                    self.log.see("end")
+                elif tipo == "prog":
+                    self.barra.configure(value=a[0])
+                    if a[1]:
+                        self.l_stato.configure(text=a[1])
+                elif tipo == "fase":
+                    self._imposta_fase(a[0])
+                elif tipo == "frame":
+                    self._mostra_immagine(a[0])
+                elif tipo == "trovati":
+                    self.trovati = a[0]
+                    self._dettaglio()
+                elif tipo == "traduzione":
+                    o, t = (x if len(x) < 60 else x[:57] + "…" for x in a)
+                    self.ultima = f"«{o}»  →  «{t}»"
+                    self._dettaglio()
+                elif tipo == "fine":
+                    self.risultato = a[0]
+                    self.b_avvia.configure(state="normal")
+                    self.b_ferma.configure(state="disabled")
+                    if a[0]:
+                        self.b_mostra.configure(state="normal")
+                        self.barra.configure(value=1.0, style="Ok.Horizontal.TProgressbar")
+                        self.l_stato.configure(text="✓  Fatto! Il video tradotto è pronto.", fg=C["ok"])
+                    elif FERMA.is_set():
+                        self.l_stato.configure(text="Interrotto: rilancia lo stesso video per riprendere.",
+                                               fg=C["testo"])
+                    else:
+                        self.l_stato.configure(text="Nessun sottotitolo trovato in questo video.", fg=C["testo"])
+                elif tipo == "errore":
+                    self._imposta_fase(self.fase, errore=True)
+                    self.b_avvia.configure(state="normal")
+                    self.b_ferma.configure(state="disabled")
+                    self.l_stato.configure(text="Si è verificato un problema", fg=C["errore"])
+                    self.l_dettaglio.configure(text=a[0])
+                    self._mostra_log(True)
+        except queue.Empty:
+            pass
+        self.root.after(80, self._leggi_eventi)
+
+    def mainloop(self):
+        self.root.mainloop()
+
+
+def gui():
+    App().mainloop()
 
 
 def main():
